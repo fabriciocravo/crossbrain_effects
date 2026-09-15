@@ -11,6 +11,7 @@ from models import(
 )
 from dataset_sampling import empirical_sample
 
+
 # Change this to change model
 true_dist = true_normal_dist
 z_eff_diff = 0
@@ -18,10 +19,10 @@ s_eff_diff = 0
 m_eff_diff = 0
 l_eff_diff = 0
 
-# Code  
+# Code
 mean_divergence = 0
 for _ in range(N_MAJOR_REPS):
-   
+
     fitted_dist = empirical_sample(
         true_dist,
         VARIABLE_NUMBER,
@@ -30,8 +31,8 @@ for _ in range(N_MAJOR_REPS):
 
     # KL DIVERGENCE (ENTROPY PART)
     # Shared grid — use ppf to get a sensible range covering both distributions' mass
-    lo = min(true_dist.ppf(0.0001), fitted_dist.ppf(0.0001))
-    hi = max(true_dist.ppf(0.9999), fitted_dist.ppf(0.9999))
+    lo = fitted_dist.ppf(1e-20)
+    hi = fitted_dist.ppf(1 - 1e-20)
     x = np.linspace(lo, hi, 10000)
 
     p = true_dist.pdf(x)
