@@ -1,111 +1,107 @@
 import numpy as np
-from scipy.stats import entropy
-import matplotlib.pyplot as plt
-from parameters import(
+from parameters import (
     VARIABLE_NUMBER,
     N_MAJOR_REPS,
-    DATASET_SIZE
+    DATASET_SIZE,
+    HEAVY_TAILED_PARS,
+    NORMAL_PARS,
+    MISTURE_PARS,
 )
-from models import(
-    true_normal_dist
+from models import (
+    normal_model,
+    heavy_tailed_model,
+    CenterMistureModel,
 )
 from dataset_sampling import empirical_sample
 
 
-# Change this to change model
-true_dist = true_normal_dist
-z_eff_diff = 0
-s_eff_diff = 0
-m_eff_diff = 0
-l_eff_diff = 0
+N_ROIS = 268
+N_EDGES = N_ROIS * (N_ROIS - 1) // 2  # 35,778 FC edges
+
+# |effect| ranges: 0-0.1 / 0.1-0.2 / 0.2-0.5 / above 0.5
+BIN_EDGES = [0.0, 0.1, 0.2, 0.5, np.inf]
+BIN_LABELS = ["0-0.1", "0.1-0.2", "0.2-0.5", ">0.5"]
+
+MODEL_FAMILIES = [
+    ("normal", normal_model, NORMAL_PARS),
+    ("heavy-tailed", heavy_tailed_model, HEAVY_TAILED_PARS),
+    ("center-mixture", CenterMistureModel, MISTURE_PARS),
+]
+
+
+def build_distributions():
+    return [
+        (name, pars, builder(*pars))
+        for name, builder, par_list in MODEL_FAMILIES
+        for pars in par_list
+    ]
+
+
+def expected_counts(dist):
+    """Expected number of edges with |effect| in each bin."""
+    counts = []
+    for lo, hi in zip(BIN_EDGES[:-1], BIN_EDGES[1:]):
+        # Calculates fraction of effects within the range
+        fraction = (dist.cdf(hi) - dist.cdf(lo)) + (dist.cdf(-lo) - dist.cdf(-hi))
+        counts.append(N_EDGES * fraction)
+
+    return np.array(counts)
+
+
+def tv_distance(true_dist, fitted_dist):
+
+    lo = fitted_dist.ppf(1e-15)
+    hi = fitted_dist.isf(1e-15)
+    x = np.linspace(lo, hi, 10000)
+    dx = x[1] - x[0]
+    # Continuous part of the true dist plus its point mass (the fitted
+    # normal has no atom, so the atom contributes fully to the TV)
+    atom = getattr(true_dist, "atom_mass", 0.0)
+    return 0.5 * (
+        np.sum(np.abs(true_dist.pdf(x) - fitted_dist.pdf(x))) * dx + atom
+    )
+
+
+def run_comparison(true_dist):
+
+    true_counts = expected_counts(true_dist)
+    tv_sum = 0.0
+    count_diff = np.zeros(len(BIN_EDGES) - 1)
+
+    for _ in range(N_MAJOR_REPS):
+
+        fitted_dist = empirical_sample(
+            true_dist,
+            VARIABLE_NUMBER,
+            DATASET_SIZE
+        )
+        
+        tv_sum += tv_distance(true_dist, fitted_dist)
+        count_diff += np.abs(true_counts - expected_counts(fitted_dist))
+
+    return tv_sum / N_MAJOR_REPS, count_diff / N_MAJOR_REPS, true_counts
+
 
 # Code
-mean_divergence = 0
-for _ in range(N_MAJOR_REPS):
+results = []
+for name, pars, true_dist in build_distributions():
 
-    fitted_dist = empirical_sample(
-        true_dist,
-        VARIABLE_NUMBER,
-        DATASET_SIZE
-    )
+    true_sd = np.std(true_dist.rvs(200_000))
+    tv, count_diff, true_counts = run_comparison(true_dist)
+    results.append((name, pars, true_sd, tv, count_diff, true_counts))
+    print(f"done: {name} {pars}", flush=True)
 
-    # KL DIVERGENCE (ENTROPY PART)
-    # Shared grid — use ppf to get a sensible range covering both distributions' mass
-    lo = fitted_dist.ppf(1e-20)
-    hi = fitted_dist.ppf(1 - 1e-20)
-    x = np.linspace(lo, hi, 10000)
 
-    p = true_dist.pdf(x)
-    q = fitted_dist.pdf(x)
-
-    # Avoid division by zero
-    eps = 1e-10
-    kl_div = entropy(p + eps, q + eps)
-
-    mean_divergence += kl_div
-
-    # EFFECT NUMBER PART
-    true_effects = true_dist.rvs(VARIABLE_NUMBER)
-    fitted_effects = fitted_dist.rvs(VARIABLE_NUMBER)
-
-    bins = [0.2, 0.5, 0.8]  # Cohen's d cutoffs: negligible/small/medium/large
-
-    true_counts = np.bincount(
-        np.digitize(np.abs(true_effects), bins), minlength=4
-    )
-    fitted_counts = np.bincount(
-        np.digitize(np.abs(fitted_effects), bins), minlength=4
-    )
-
-    z_eff_diff += abs(true_counts[0] - fitted_counts[0])
-    s_eff_diff += abs(true_counts[1] - fitted_counts[1])
-    m_eff_diff += abs(true_counts[2] - fitted_counts[2])
-    l_eff_diff += abs(true_counts[3] - fitted_counts[3])
-
-    last_fitted_dist = fitted_dist
-
-mean_divergence = mean_divergence / N_MAJOR_REPS
-z_eff_diff /= N_MAJOR_REPS
-s_eff_diff /= N_MAJOR_REPS
-m_eff_diff /= N_MAJOR_REPS
-l_eff_diff /= N_MAJOR_REPS
-
-print(f"Mean KL divergence over {N_MAJOR_REPS} reps: {mean_divergence:.6f}")
-print(f"Mean |Δcount| negligible: {z_eff_diff:.2f}")
-print(f"Mean |Δcount| small:      {s_eff_diff:.2f}")
-print(f"Mean |Δcount| medium:     {m_eff_diff:.2f}")
-print(f"Mean |Δcount| large:      {l_eff_diff:.2f}")
-
-# --- Representative plot (uses the last rep's fitted distribution) ---
-lo = min(true_dist.ppf(0.0001), last_fitted_dist.ppf(0.0001))
-hi = max(true_dist.ppf(0.9999), last_fitted_dist.ppf(0.9999))
-x = np.linspace(lo, hi, 1000)
-
-plt.figure(figsize=(8, 5))
-plt.plot(
-    x,
-    true_dist.pdf(x),
-    label="True distribution",
-    linewidth=2
+# Table 1 - divergence and error in the number of effects
+header = (
+    f"{'model':<13}{'params':<24}{'true SD':>9}{'TV':>11}"
+    + "".join(f"{'|d| ' + lab:>13}" for lab in BIN_LABELS)
 )
-plt.plot(
-    x,
-    last_fitted_dist.pdf(x),
-    label="Fitted (empirical) distribution",
-    linewidth=2,
-    linestyle="--"
-)
-plt.fill_between(x, true_dist.pdf(x), alpha=0.15)
-plt.fill_between(x, last_fitted_dist.pdf(x), alpha=0.15)
-plt.title(
-    "True vs. Fitted Distribution"
-    f"(mean KL divergence = {mean_divergence:.4f})"
-)
-plt.xlabel("Effect size")
-plt.ylabel("Density")
-plt.legend()
-plt.tight_layout()
-plt.show()
-
-
-
+print(f"\nMean over {N_MAJOR_REPS} reps; counts out of {N_EDGES} edges")
+print(header)
+print("-" * len(header))
+for name, pars, true_sd, kl, count_diff, _ in results:
+    print(
+        f"{name:<13}{str(pars):<24}{true_sd:>9.4f}{kl:>11.6f}"
+        + "".join(f"{100 * d / N_EDGES:>12.2f}%" for d in count_diff)
+    )
